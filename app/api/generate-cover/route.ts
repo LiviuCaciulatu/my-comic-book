@@ -24,7 +24,7 @@ export async function POST(request: Request) {
 
     const payload = (await request.json()) as CoverPayload;
     const client = new OpenAI({ apiKey });
-    const model = process.env.OPENAI_IMAGE_MODEL || "gpt-image-1";
+    const model = process.env.OPENAI_IMAGE_MODEL || "gpt-image-1.5";
 
     const prompt = `Create a comic cover illustration with these details:
 Title: ${payload.title || "N/A"}

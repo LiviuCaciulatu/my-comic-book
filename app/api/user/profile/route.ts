@@ -34,8 +34,12 @@ export async function GET() {
       .single(),
   ]);
 
+  if (!clientResult.data) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   return NextResponse.json({
-    fullName: clientResult.data?.full_name ?? user.email ?? "User",
+    fullName: clientResult.data.full_name ?? user.email ?? "User",
     balance: walletResult.data?.balance ?? 0,
   });
 }

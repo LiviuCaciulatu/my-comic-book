@@ -80,6 +80,7 @@ const PAGE_COUNTS = [10, 20, 40];
 export default function CreateComicBook({ characters, onClose }: Props) {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const [tokenBalance, setTokenBalance] = useState<number | null>(null);
   const [styles, setStyles] = useState<StylePreset[]>([]);
   const [stylesLoading, setStylesLoading] = useState(true);
   const [generatedSynopsis, setGeneratedSynopsis] = useState<string | null>(null);
@@ -87,6 +88,9 @@ export default function CreateComicBook({ characters, onClose }: Props) {
   const [pendingProjectPayload, setPendingProjectPayload] = useState<ProjectPayload | null>(null);
   const [generatingVisualBible, setGeneratingVisualBible] = useState(false);
   const [generatingScript, setGeneratingScript] = useState(false);
+  const [generatingImages, setGeneratingImages] = useState(false);
+  const [generatedPages, setGeneratedPages] = useState<{ page_number: number; page_type: string; image_url: string | null }[] | null>(null);
+  const [currentPageIndex, setCurrentPageIndex] = useState(0);
 
   useEffect(() => {
     async function loadStyles() {
@@ -105,7 +109,17 @@ export default function CreateComicBook({ characters, onClose }: Props) {
     loadStyles();
   }, []);
 
-  const canSubmit = useMemo(() => characters.length > 0, [characters.length]);
+  useEffect(() => {
+    fetch("/api/user/profile")
+      .then((r) => r.json())
+      .then((d) => setTokenBalance(d.balance ?? 0))
+      .catch(() => setTokenBalance(0));
+  }, []);
+
+  const canSubmit = useMemo(
+    () => characters.length > 0 && (tokenBalance === null || tokenBalance >= 20),
+    [characters.length, tokenBalance]
+  );
 
   async function handleSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -276,7 +290,37 @@ export default function CreateComicBook({ characters, onClose }: Props) {
 
           console.log("✅ Comic script generated and saved successfully");
           setGeneratingScript(false);
-          onClose();
+
+          // Step 5: Generate page images
+          setGeneratingImages(true);
+          console.log("🚀 Step 5: Starting image generation for project:", json.id);
+
+          try {
+            const imagesRes = await fetch("/api/projects/generate-pages", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ project_id: json.id }),
+            });
+
+            const imagesJson = await imagesRes.json();
+            console.log("🖼️ Image generation response:", imagesJson);
+
+            if (!imagesRes.ok) {
+              throw new Error(imagesJson.error || "Failed to generate images");
+            }
+
+            console.log("✅ All page images generated successfully");
+            setGeneratingImages(false);
+            const pages = (imagesJson.generated_pages ?? []) as { page_number: number; page_type: string; image_url: string | null }[];
+            const sorted = [...pages].sort((a, b) => a.page_number - b.page_number);
+            setCurrentPageIndex(0);
+            setGeneratedPages(sorted);
+          } catch (imgErr) {
+            const errorMsg = imgErr instanceof Error ? imgErr.message : "Failed to generate images";
+            console.error("❌ Image generation error:", errorMsg);
+            setError(errorMsg);
+            setGeneratingImages(false);
+          }
         } catch (scriptErr) {
           const errorMsg = scriptErr instanceof Error ? scriptErr.message : "Failed to generate comic script";
           console.error("❌ Comic script error:", errorMsg);
@@ -306,7 +350,7 @@ export default function CreateComicBook({ characters, onClose }: Props) {
     setError("");
   }
 
-  if (isSubmitting && generatedSynopsis === null && !generatingVisualBible) {
+  if (isSubmitting && generatedSynopsis === null && !generatingVisualBible && generatedPages === null) {
     return (
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
         <div className="w-full max-w-md rounded-2xl bg-white p-8 text-center shadow-xl">
@@ -337,6 +381,75 @@ export default function CreateComicBook({ characters, onClose }: Props) {
           <div className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-4 border-emerald-200 border-t-emerald-600" />
           <p className="mb-2 text-xl font-bold text-gray-900">Generating comic script...</p>
           <p className="text-gray-600">Creating page-level narrative.</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (generatingImages) {
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+        <div className="w-full max-w-md rounded-2xl bg-white p-8 text-center shadow-xl">
+          <div className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-4 border-purple-200 border-t-purple-600" />
+          <p className="mb-2 text-xl font-bold text-gray-900">Generating page images...</p>
+          <p className="text-gray-600">AI is illustrating each page. This may take a few minutes.</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (generatedPages !== null) {
+    const page = generatedPages[currentPageIndex];
+    const total = generatedPages.length;
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4">
+        <div className="flex w-full max-w-2xl flex-col rounded-2xl bg-white shadow-2xl overflow-hidden">
+          {/* Header */}
+          <div className="flex items-center justify-between border-b px-6 py-4">
+            <p className="text-sm font-semibold uppercase tracking-wide text-gray-500">
+              {page.page_type === "cover" ? "Front Cover" : page.page_type === "back" ? "Back Cover" : `Page ${page.page_number}`}
+            </p>
+            <span className="text-sm text-gray-400">{currentPageIndex + 1} / {total}</span>
+            <button
+              onClick={onClose}
+              className="text-2xl leading-none text-gray-400 hover:text-gray-600"
+            >
+              &times;
+            </button>
+          </div>
+
+          {/* Image */}
+          <div className="flex items-center justify-center bg-gray-100" style={{ minHeight: 480 }}>
+            {page.image_url ? (
+              <img
+                src={page.image_url}
+                alt={`Page ${page.page_number}`}
+                className="max-h-[70vh] w-auto object-contain"
+              />
+            ) : (
+              <div className="flex h-64 items-center justify-center text-sm text-gray-400">
+                No image available
+              </div>
+            )}
+          </div>
+
+          {/* Navigation */}
+          <div className="flex items-center justify-between border-t px-6 py-4">
+            <button
+              onClick={() => setCurrentPageIndex((i) => Math.max(0, i - 1))}
+              disabled={currentPageIndex === 0}
+              className="rounded-lg border border-gray-300 px-5 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-30"
+            >
+              ← Previous
+            </button>
+            <button
+              onClick={() => setCurrentPageIndex((i) => Math.min(total - 1, i + 1))}
+              disabled={currentPageIndex === total - 1}
+              className="rounded-lg bg-purple-600 px-5 py-2 text-sm font-semibold text-white hover:bg-purple-700 disabled:opacity-30"
+            >
+              Next →
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -608,9 +721,15 @@ export default function CreateComicBook({ characters, onClose }: Props) {
             </div>
           </div>
 
-          {!canSubmit && (
+          {characters.length === 0 && (
             <p className="text-sm text-amber-700">
               You need at least one created character before starting a comic project.
+            </p>
+          )}
+
+          {tokenBalance !== null && tokenBalance < 20 && (
+            <p className="text-sm text-amber-700">
+              Not enough tokens. You need 20 tokens to create a comic book (you have {tokenBalance}).
             </p>
           )}
 

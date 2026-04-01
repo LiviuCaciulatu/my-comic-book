@@ -28,7 +28,7 @@ function normalizeListValue(raw: string): string | null {
       return cleaned || null;
     }
   } catch {
-    // Keep non-JSON values as plain text.
+
   }
 
   return raw;
@@ -385,4 +385,72 @@ export async function POST(req: Request) {
     faceImagePath,
     faceImageUrl,
   });
+}
+
+export async function DELETE(req: Request) {
+  const serverClient = await createSupabaseServerClient();
+  const {
+    data: { user },
+    error: authError,
+  } = await serverClient.auth.getUser();
+
+  if (authError || !user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const { searchParams } = new URL(req.url);
+  const id = searchParams.get("id");
+
+  if (!id) {
+    return NextResponse.json({ error: "Missing character id." }, { status: 400 });
+  }
+
+  const admin = createSupabaseAdminClient();
+
+  const { data: character, error: fetchError } = await admin
+    .from("character_identities")
+    .select("id, client_id, reference_image_path, reference_face_image_path")
+    .eq("id", id)
+    .single();
+
+  if (fetchError || !character) {
+    return NextResponse.json({ error: "Character not found." }, { status: 404 });
+  }
+
+  if (character.client_id !== user.id) {
+    return NextResponse.json({ error: "Forbidden." }, { status: 403 });
+  }
+
+  // Extract storage paths from signed URLs
+  function extractStoragePath(signedUrl: string | null, bucket: string): string | null {
+    if (!signedUrl) return null;
+    try {
+      const url = new URL(signedUrl);
+      const prefix = `/storage/v1/object/sign/${bucket}/`;
+      if (url.pathname.startsWith(prefix)) return url.pathname.slice(prefix.length);
+    } catch {
+      // ignore
+    }
+    return null;
+  }
+
+  const storagePaths = [
+    extractStoragePath(character.reference_image_path, CHARACTER_IMAGES_BUCKET),
+    extractStoragePath(character.reference_face_image_path, CHARACTER_IMAGES_BUCKET),
+  ].filter((p): p is string => Boolean(p));
+
+  if (storagePaths.length > 0) {
+    await admin.storage.from(CHARACTER_IMAGES_BUCKET).remove(storagePaths);
+  }
+
+  const { error: deleteError } = await admin
+    .from("character_identities")
+    .delete()
+    .eq("id", id);
+
+  if (deleteError) {
+    return NextResponse.json({ error: deleteError.message }, { status: 500 });
+  }
+
+  return NextResponse.json({ success: true });
 }

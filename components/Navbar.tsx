@@ -29,7 +29,15 @@ export default function Navbar() {
 
   async function loadUserInfo() {
     const res = await fetch("/api/user/profile");
-    if (!res.ok) return;
+    if (!res.ok) {
+      // Stale session — sign out silently and clear UI
+      if (res.status === 401) {
+        const supabase = createSupabaseBrowserClient();
+        await supabase.auth.signOut();
+        setUserInfo(null);
+      }
+      return;
+    }
     const data = await res.json();
     setUserInfo({ fullName: data.fullName, balance: data.balance });
   }
@@ -105,9 +113,7 @@ export default function Navbar() {
               {userInfo.balance} tokens
             </button>
           </div>
-        ) : (
-          <div className="h-5 w-36 animate-pulse rounded bg-gray-100" />
-        )}
+        ) : null}
       </div>
 
       {/* center — site title */}
@@ -119,12 +125,14 @@ export default function Navbar() {
 
       {/* right — logout */}
       <div className="flex w-1/3 justify-end">
-        <button
-          onClick={handleLogout}
-          className="rounded-md bg-gray-100 px-4 py-1.5 text-sm font-medium text-gray-700 hover:bg-red-50 hover:text-red-600 transition-colors"
-        >
-          Log out
-        </button>
+        {userInfo && (
+          <button
+            onClick={handleLogout}
+            className="rounded-md bg-gray-100 px-4 py-1.5 text-sm font-medium text-gray-700 hover:bg-red-50 hover:text-red-600 transition-colors"
+          >
+            Log out
+          </button>
+        )}
       </div>
 
       {/* Token modal */}

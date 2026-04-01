@@ -1,6 +1,8 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
+
+const CHARACTER_TOKEN_COST = 2;
 
 const CORE_TRAITS = [
   "Cheerful", "Optimistic", "Brave", "Curious", "Kind", "Calm", "Shy",
@@ -26,6 +28,14 @@ export default function CreateCharacter({ onClose }: Props) {
   const [customFeature, setCustomFeature] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const [tokenBalance, setTokenBalance] = useState<number | null>(null);
+
+  useEffect(() => {
+    fetch("/api/user/profile")
+      .then((r) => r.json())
+      .then((d) => setTokenBalance(d.balance ?? 0))
+      .catch(() => setTokenBalance(0));
+  }, []);
 
   function toggleTrait(trait: string) {
     setSelectedTraits((prev) =>
@@ -279,12 +289,22 @@ export default function CreateCharacter({ onClose }: Props) {
 
           {error && <p className="text-sm text-red-600">{error}</p>}
 
+          {tokenBalance !== null && tokenBalance < CHARACTER_TOKEN_COST && (
+            <p className="text-sm text-amber-700">
+              Not enough tokens. You need {CHARACTER_TOKEN_COST} tokens to create a character (you have {tokenBalance}).
+            </p>
+          )}
+
           {/* Actions */}
           <div className="flex justify-end gap-3 pt-2">
             <button type="button" onClick={onClose} className="px-5 py-2 text-sm font-medium text-gray-600 border rounded-lg hover:bg-gray-50 transition-colors">
               Cancel
             </button>
-            <button type="submit" disabled={isSubmitting} className="px-5 py-2 text-sm font-medium bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 transition-colors">
+            <button
+              type="submit"
+              disabled={isSubmitting || (tokenBalance !== null && tokenBalance < CHARACTER_TOKEN_COST)}
+              className="px-5 py-2 text-sm font-medium bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 transition-colors"
+            >
               {isSubmitting ? "Saving…" : "Create Character"}
             </button>
           </div>

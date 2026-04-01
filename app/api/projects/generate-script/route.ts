@@ -15,6 +15,35 @@ type ProjectStoryPage = {
   page_description?: string;
 };
 
+type GeneratedPanel = {
+  panel_number?: number;
+  panel_type?: string;
+  camera_angle?: string;
+  composition?: string;
+  action_description?: string;
+  characters_present?: string;
+  dialogue_text?: string;
+  caption_text?: string;
+  visual_focus?: string;
+  layout_position?: string;
+};
+
+function extractJsonFromOpenAiContent(content: string): unknown {
+  let cleanedContent = content.trim();
+
+  if (cleanedContent.startsWith("```json")) {
+    cleanedContent = cleanedContent.slice(7);
+  }
+  if (cleanedContent.startsWith("```")) {
+    cleanedContent = cleanedContent.slice(3);
+  }
+  if (cleanedContent.endsWith("```")) {
+    cleanedContent = cleanedContent.slice(0, -3);
+  }
+
+  return JSON.parse(cleanedContent.trim());
+}
+
 function getPanelCountForStoryType(pageType: string): number {
   switch (pageType) {
     case "intro":
@@ -248,24 +277,16 @@ RULES:
 
     // Parse JSON, stripping markdown if present
     let projectScript;
-    let cleanedContent = content.trim();
-    if (cleanedContent.startsWith("```json")) {
-      cleanedContent = cleanedContent.slice(7); // Remove ```json
-    }
-    if (cleanedContent.startsWith("```")) {
-      cleanedContent = cleanedContent.slice(3); // Remove ```
-    }
-    if (cleanedContent.endsWith("```")) {
-      cleanedContent = cleanedContent.slice(0, -3); // Remove trailing ```
-    }
 
     try {
-      const parsed = JSON.parse(cleanedContent);
+      const parsed = extractJsonFromOpenAiContent(content) as {
+        project_story?: unknown;
+      } & Record<string, unknown>;
       projectScript = parsed.project_story || parsed;
       console.log("[Comic Script] Parsed project script:", projectScript);
     } catch (parseError) {
       console.error("[Comic Script] Failed to parse OpenAI response:", parseError);
-      console.error("[Comic Script] Raw content:", cleanedContent);
+      console.error("[Comic Script] Raw content:", content);
       return NextResponse.json(
         { error: "Failed to parse script response" },
         { status: 500 }
@@ -395,7 +416,7 @@ RULES:
     const { data: insertedPages, error: insertPagesError } = await adminClient
       .from("project_pages")
       .insert(pageRows)
-      .select("id, page_number, page_type, story_beat_title, panel_count, layout_key");
+      .select("id, page_number, page_type, page_description, story_beat_title, panel_count, layout_key");
 
     if (insertPagesError) {
       console.error("[Comic Script] Failed to insert project_pages:", insertPagesError);
@@ -407,11 +428,284 @@ RULES:
 
     console.log("[Comic Script] Inserted project_pages:", insertedPages);
 
+    const characterDesign =
+      project.character_design && typeof project.character_design === "object"
+        ? project.character_design
+        : {};
+    const visualDirection =
+      project.visual_direction && typeof project.visual_direction === "object"
+        ? project.visual_direction
+        : {};
+
+    const { error: deletePanelsError } = await adminClient
+      .from("project_panels")
+      .delete()
+      .eq("project_id", project_id);
+
+    if (deletePanelsError) {
+      console.error("[Comic Script] Failed to clear existing project_panels:", deletePanelsError);
+      return NextResponse.json(
+        { error: "Failed to clear existing project panels." },
+        { status: 500 }
+      );
+    }
+
+    const panelRows: Array<Record<string, unknown>> = [];
+    const maxPanelJsonRetries = 3;
+
+    for (const page of insertedPages || []) {
+      const pageDescription =
+        (typeof page.page_description === "string" && page.page_description.trim()) ||
+        (page.page_type === "cover"
+          ? "Cover page introducing the comic world and main character."
+          : page.page_type === "back"
+            ? "Back page with a calm closing visual moment."
+            : "");
+
+      const panelPrompt = `You are a comic storyboard artist.
+
+Generate panels for ONE comic page.
+
+PAGE
+Description: ${pageDescription}
+Panels: ${page.panel_count}
+Layout: ${page.layout_key}
+Language: ${project.text_language}
+
+CHARACTER (CONSISTENCY)
+
+Name: ${character.name}
+Look: ${String(characterDesign.description || "")}
+Outfit: ${String(characterDesign.costume || "")}
+Iconic: ${String(characterDesign.iconic_elements || "")}
+
+STYLE
+
+${String(visualDirection.overall_style || "")}
+Colors: ${String(visualDirection.color_palette || "")}
+
+RULES
+
+- Generate exactly ${page.panel_count} panels
+- Each panel = ONE clear visual moment
+- Panels must progress the scene logically
+- Maintain character and environment continuity
+- Reading order: left → right, top → bottom
+- Keep actions simple and easy to illustrate
+- Prefer visual storytelling over dialogue
+
+PANEL FORMAT
+
+Each panel must include:
+
+panel_number (1 → N)
+
+panel_type (story purpose, choose one):
+establishing, action, reaction, detail
+
+camera_angle (viewpoint, choose one):
+eye_level, low_angle, high_angle, over_the_shoulder
+
+composition:
+- describe subject placement and framing (foreground/background, left/right, depth)
+- max 1 sentence
+
+action_description:
+- max 1 sentence
+- clear and concrete
+
+characters_present:
+- comma separated
+- use ONLY known character names
+- no new characters
+
+dialogue_text:
+- optional
+- MAX 8 words
+- MUST BE UPPERCASE
+
+caption_text:
+- optional
+- MAX 10 words
+- MUST BE UPPERCASE
+
+visual_focus:
+- main subject of the panel
+
+layout_position:
+- position in page layout
+- must match layout: ${page.layout_key}
+- examples: top_left, top_right, top_full, middle_left, middle_right, bottom_left, bottom_right, bottom_full
+
+CONSTRAINTS
+
+- Avoid complex actions
+- Avoid repeating same panel_type more than 2 times in a row
+- Keep scenes visually clean
+
+OUTPUT (STRICT JSON)
+
+{
+  "panels": [
+    {
+      "panel_number": 1,
+      "panel_type": "",
+      "camera_angle": "",
+      "composition": "",
+      "action_description": "",
+      "characters_present": "",
+      "dialogue_text": "",
+      "caption_text": "",
+      "visual_focus": "",
+      "layout_position": ""
+    }
+  ]
+}
+
+- Output MUST be valid JSON
+- No extra text
+- No trailing commas`;
+
+      let generatedPanels: GeneratedPanel[] = [];
+      let parsedSuccessfully = false;
+      let lastPanelContent = "";
+
+      for (let attempt = 1; attempt <= maxPanelJsonRetries; attempt++) {
+        console.log(
+          `[Comic Script] Generating panels for page ${page.page_number} (attempt ${attempt}/${maxPanelJsonRetries})...`
+        );
+
+        const panelResponse = await openai.chat.completions.create({
+          model: "gpt-4o-mini",
+          max_tokens: 4000,
+          messages: [
+            {
+              role: "user",
+              content: panelPrompt,
+            },
+          ],
+        });
+
+        console.log(
+          `[Comic Script] OpenAI panel response for page ${page.page_number} (attempt ${attempt}):`,
+          panelResponse
+        );
+
+        const panelContent = panelResponse.choices[0]?.message?.content;
+        if (!panelContent || typeof panelContent !== "string") {
+          console.error(
+            `[Comic Script] Missing panel content for page ${page.page_number} on attempt ${attempt}`
+          );
+
+          if (attempt === maxPanelJsonRetries) {
+            return NextResponse.json(
+              { error: `No panel content returned for page ${page.page_number}.` },
+              { status: 500 }
+            );
+          }
+
+          continue;
+        }
+
+        lastPanelContent = panelContent;
+        console.log(
+          `[Comic Script] OpenAI panel content for page ${page.page_number} (attempt ${attempt}):`,
+          panelContent
+        );
+
+        try {
+          const parsedPanels = extractJsonFromOpenAiContent(panelContent) as {
+            panels?: GeneratedPanel[];
+          };
+
+          generatedPanels = Array.isArray(parsedPanels.panels)
+            ? parsedPanels.panels
+            : [];
+          parsedSuccessfully = true;
+          break;
+        } catch (parsePanelError) {
+          console.error(
+            `[Comic Script] Failed to parse panels JSON for page ${page.page_number} on attempt ${attempt}:`,
+            parsePanelError
+          );
+          console.error("[Comic Script] Raw panel content:", panelContent);
+
+          if (attempt < maxPanelJsonRetries) {
+            console.log(
+              `[Comic Script] Retrying page ${page.page_number} due to invalid JSON...`
+            );
+          }
+        }
+      }
+
+      if (!parsedSuccessfully) {
+        console.error(
+          `[Comic Script] Exhausted retries for page ${page.page_number}. Last panel content:`,
+          lastPanelContent
+        );
+        return NextResponse.json(
+          {
+            error: `Failed to parse panel response for page ${page.page_number} after ${maxPanelJsonRetries} attempts.`,
+          },
+          { status: 500 }
+        );
+      }
+
+      if (generatedPanels.length !== page.panel_count) {
+        console.error(`[Comic Script] Panel count mismatch on page ${page.page_number}:`, {
+          expected: page.panel_count,
+          received: generatedPanels.length,
+          generatedPanels,
+        });
+        return NextResponse.json(
+          {
+            error: `Panel count mismatch on page ${page.page_number}. Expected ${page.panel_count}, got ${generatedPanels.length}.`,
+          },
+          { status: 500 }
+        );
+      }
+
+      generatedPanels.forEach((panel, index) => {
+        panelRows.push({
+          project_id,
+          page_id: page.id,
+          panel_number: Number(panel.panel_number ?? index + 1),
+          panel_type: String(panel.panel_type || "").trim() || null,
+          camera_angle: String(panel.camera_angle || "").trim() || null,
+          composition: String(panel.composition || "").trim() || null,
+          action_description: String(panel.action_description || "").trim() || null,
+          characters_present: String(panel.characters_present || "").trim() || null,
+          dialogue_text: String(panel.dialogue_text || "").trim() || null,
+          layout_position: String(panel.layout_position || "").trim() || null,
+          caption_text: String(panel.caption_text || "").trim() || null,
+          visual_focus: String(panel.visual_focus || "").trim() || null,
+          updated_at: new Date().toISOString(),
+        });
+      });
+    }
+
+    console.log("[Comic Script] Inserting project_panels into database...");
+    const { data: insertedPanels, error: insertPanelsError } = await adminClient
+      .from("project_panels")
+      .insert(panelRows)
+      .select("id, page_id, panel_number, panel_type, camera_angle, layout_position");
+
+    if (insertPanelsError) {
+      console.error("[Comic Script] Failed to insert project_panels:", insertPanelsError);
+      return NextResponse.json(
+        { error: "Failed to save project panels to database." },
+        { status: 500 }
+      );
+    }
+
+    console.log("[Comic Script] Inserted project_panels:", insertedPanels);
+
     return NextResponse.json({
       success: true,
       projectScript,
       projectId: project_id,
       projectPages: insertedPages,
+      projectPanels: insertedPanels,
     });
   } catch (error) {
     console.error("[Comic Script] Unexpected error:", error);

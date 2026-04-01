@@ -154,3 +154,67 @@ export async function POST(req: Request) {
   console.log("✅ Project successfully inserted with ID:", data.id);
   return NextResponse.json({ success: true, id: data.id });
 }
+
+const PAGE_IMAGES_BUCKET =
+  process.env.SUPABASE_PAGE_IMAGES_BUCKET ?? "page-images";
+
+export async function DELETE(req: Request) {
+  const serverClient = await createSupabaseServerClient();
+  const {
+    data: { user },
+    error: authError,
+  } = await serverClient.auth.getUser();
+
+  if (authError || !user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const { searchParams } = new URL(req.url);
+  const id = searchParams.get("id");
+
+  if (!id) {
+    return NextResponse.json({ error: "Missing project id." }, { status: 400 });
+  }
+
+  const admin = createSupabaseAdminClient();
+
+  const { data: project, error: fetchError } = await admin
+    .from("projects")
+    .select("id, client_id")
+    .eq("id", id)
+    .single();
+
+  if (fetchError || !project) {
+    return NextResponse.json({ error: "Project not found." }, { status: 404 });
+  }
+
+  if (project.client_id !== user.id) {
+    return NextResponse.json({ error: "Forbidden." }, { status: 403 });
+  }
+
+  // Delete all page images from bucket
+  const folderPath = `${user.id}/projects/${id}/pages`;
+  const { data: files } = await admin.storage
+    .from(PAGE_IMAGES_BUCKET)
+    .list(folderPath);
+
+  if (files && files.length > 0) {
+    const filePaths = files.map((f) => `${folderPath}/${f.name}`);
+    await admin.storage.from(PAGE_IMAGES_BUCKET).remove(filePaths);
+  }
+
+  // Delete child records then the project
+  await admin.from("project_panels").delete().eq("project_id", id);
+  await admin.from("project_pages").delete().eq("project_id", id);
+
+  const { error: deleteError } = await admin
+    .from("projects")
+    .delete()
+    .eq("id", id);
+
+  if (deleteError) {
+    return NextResponse.json({ error: deleteError.message }, { status: 500 });
+  }
+
+  return NextResponse.json({ success: true });
+}

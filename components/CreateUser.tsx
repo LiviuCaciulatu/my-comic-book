@@ -3,6 +3,8 @@
 import { useRouter } from "next/navigation";
 import { FormEvent, useState } from "react";
 
+import { createSupabaseBrowserClient } from "@/lib/supabase/client";
+
 type CreateUserResponse = {
   client?: {
     id: string;
@@ -61,11 +63,25 @@ export default function CreateUser() {
         return;
       }
 
+      const supabase = createSupabaseBrowserClient();
+      const { error: signInError } = await supabase.auth.signInWithPassword({
+        email: payload.email,
+        password: payload.password,
+      });
+
+      if (signInError) {
+        setError(
+          "User created, but automatic login failed. Please log in manually.",
+        );
+        router.push("/login");
+        return;
+      }
+
       setSuccessMessage(
         `Created ${data.client.full_name} (${data.client.email}) successfully.`,
       );
       form.reset();
-      router.push("/dashboard");
+      router.push("/comic-book");
     } catch {
       setError("Could not connect to the create user API.");
     } finally {
